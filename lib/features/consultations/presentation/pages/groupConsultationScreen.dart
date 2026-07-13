@@ -40,6 +40,7 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
   String? _activeGroupId;
   Map<String, dynamic>? _activeGroup;
   String? _accountType;
+  Map<String, dynamic>? _currentUserData;
 
   List<PlatformFile> _selectedFiles = [];
   bool _isRecording = false;
@@ -53,6 +54,7 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
     super.initState();
     _activeGroupId = widget.groupId;
     _loadCurrentUserRole();
+    _loadCurrentUserData();
     _loadActiveGroup();
     _configureAudioPlayer();
   }
@@ -88,6 +90,14 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
     if (user == null) return;
     final snap = await _firestore.collection('users').doc(user.uid).get();
     if (mounted) setState(() => _accountType = snap.data()?['accountType']?.toString());
+  }
+
+
+  Future<void> _loadCurrentUserData() async {
+    final user = _auth.currentUser;
+    if (user == null) return;
+    final snap = await _firestore.collection('users').doc(user.uid).get();
+    if (mounted) setState(() => _currentUserData = snap.data() ?? <String, dynamic>{});
   }
 
   Future<void> _loadActiveGroup() async {
@@ -646,23 +656,36 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
     setState(() => _isSending = true);
 
     try {
-      final userData = await _firestore.collection("users").doc(user.uid).get();
-      final fullName = userData.data()?['fullName'] ?? 'مستخدم';
-      final photoURL = userData.data()?['photoURL'];
+      final cachedUserData = _currentUserData;
+      final userData = cachedUserData ?? (await _firestore.collection("users").doc(user.uid).get()).data() ?? <String, dynamic>{};
+      _currentUserData ??= userData;
+      final fullName = userData['fullName'] ?? user.displayName ?? 'مستخدم';
+      final photoURL = userData['photoURL'] ?? user.photoURL;
+      final senderGender = userData['gender'];
+      final text = _messageController.text.trim();
+      final replyTo = _replyToMessage;
+      final selectedFiles = List<PlatformFile>.from(_selectedFiles);
+
+      _messageController.clear();
+      setState(() {
+        _replyToMessage = null;
+        _selectedFiles.clear();
+      });
 
       final List<Map<String, String>> files = [];
 
-      for (final file in _selectedFiles) {
+      for (final file in selectedFiles) {
         final uploadedFile = await _encodeGroupFileInline(file);
         files.add(uploadedFile);
       }
 
       final firstFile = files.isNotEmpty ? files.first : null;
       final msg = {
-        'text': _messageController.text.trim(),
+        'text': text,
         'senderId': user.uid,
         'senderName': fullName,
         'senderImage': photoURL,
+        'senderGender': senderGender,
         'timestamp': FieldValue.serverTimestamp(),
         'files': files,
         'fileUrl': firstFile?['fileUrl'],
@@ -671,21 +694,18 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
         'type': firstFile?['fileType'] ?? 'text',
         'status': 'sent',
         'reactions': <String, dynamic>{},
-        'replyTo': _replyToMessage,
+        'replyTo': replyTo,
       };
 
-      await _messagesCollection.add(msg);
-      await _groupDoc.update({
-        'lastMessage': _messageController.text.trim().isNotEmpty ? _messageController.text.trim() : 'مرفق',
+      final messageRef = _messagesCollection.doc();
+      final batch = _firestore.batch();
+      batch.set(messageRef, msg);
+      batch.update(_groupDoc, {
+        'lastMessage': text.isNotEmpty ? text : 'مرفق',
         'lastMessageTime': FieldValue.serverTimestamp(),
         'deletedFor': FieldValue.arrayRemove([user.uid]),
       });
-
-      _messageController.clear();
-      setState(() {
-        _replyToMessage = null;
-        _selectedFiles.clear();
-      });
+      await batch.commit();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
