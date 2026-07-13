@@ -893,6 +893,7 @@ Future<DocumentSnapshot<Map<String, dynamic>>> _consultationDoc() =>
           ? _messageController.text.trim()
           : fileName ?? 'ملف مرفق',
       'lastMessageTime': FieldValue.serverTimestamp(),
+      'deletedFor': FieldValue.arrayRemove([_auth.currentUser?.uid]),
     });
   }
 
@@ -2832,7 +2833,7 @@ Future<DocumentSnapshot<Map<String, dynamic>>> _consultationDoc() =>
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('حذف المحادثة'),
-        content: const Text('هل أنت متأكد أنك تريد حذف هذه المحادثة وجميع رسائلها من قاعدة البيانات؟'),
+        content: const Text('هل تريد حذف هذه المحادثة من قائمتك فقط؟ لن تتأثر لدى الطرف الآخر.'),
         actions: [
           TextButton(
             child: const Text('إلغاء'),
@@ -2852,38 +2853,19 @@ Future<DocumentSnapshot<Map<String, dynamic>>> _consultationDoc() =>
 
   Future<void> _deleteCurrentConsultation() async {
     try {
-      final consultationRef = _firestore.collection('consultations').doc(widget.consultationId);
+      final user = _auth.currentUser;
+      if (user == null) return;
 
-      while (true) {
-        final messages = await consultationRef.collection('messages').limit(400).get();
-        if (messages.docs.isEmpty) break;
-
-        final batch = _firestore.batch();
-        for (final message in messages.docs) {
-          batch.delete(message.reference);
-        }
-        await batch.commit();
-      }
-
-      final notifications = await _firestore
-          .collection('notifications')
-          .where('consultationId', isEqualTo: widget.consultationId)
-          .get();
-      if (notifications.docs.isNotEmpty) {
-        final batch = _firestore.batch();
-        for (final notification in notifications.docs) {
-          batch.delete(notification.reference);
-        }
-        await batch.commit();
-      }
-
-      await consultationRef.delete();
+      await _firestore.collection('consultations').doc(widget.consultationId).set({
+        'deletedFor': FieldValue.arrayUnion([user.uid]),
+        'deletedAtByUser.${user.uid}': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
 
       if (!mounted) return;
       final messenger = ScaffoldMessenger.of(context);
       Navigator.pop(context);
       messenger.showSnackBar(
-        const SnackBar(content: Text('تم حذف المحادثة بالكامل')),
+        const SnackBar(content: Text('تم حذف المحادثة من قائمتك')),
       );
     } catch (e) {
       _showErrorSnackbar('فشل في حذف المحادثة: $e');

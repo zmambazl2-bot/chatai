@@ -97,9 +97,10 @@ class _UpcomingAppointmentsWidgetState extends State<UpcomingAppointmentsWidget>
                     ? appointment.userImageUrl ?? ''
                     : appointment.doctorImageUrl ?? '';
 
+                final displayGender = accountType == 'doctor' ? null : appointment.doctorGender;
                 final specialty = appointment.specialtyName;
 
-                return _buildAppointmentCard(context, displayName, displayImage, appointment, date, specialty: specialty);
+                return _buildAppointmentCard(context, displayName, displayImage, appointment, date, specialty: specialty, displayGender: displayGender);
               },
             ),
           ],
@@ -115,6 +116,7 @@ class _UpcomingAppointmentsWidgetState extends State<UpcomingAppointmentsWidget>
       Appointment appointment,
       DateTime date, {
         String specialty = '',
+        String? displayGender,
       }) {
     final status = appointment.status;
     final theme = Theme.of(context);
@@ -171,7 +173,7 @@ class _UpcomingAppointmentsWidgetState extends State<UpcomingAppointmentsWidget>
             children: [
               CircleAvatar(
                 radius: 30,
-                backgroundImage: DoctorImageUtils.imageProvider(imageUrl: displayImage, gender: appointment.doctorGender),
+                backgroundImage: DoctorImageUtils.imageProvider(imageUrl: displayImage, gender: displayGender),
               ),
               const SizedBox(width: 12),
               Expanded(
