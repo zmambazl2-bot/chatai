@@ -25,6 +25,7 @@ dependencies:
   google_fonts: any
   internet_connection_checker: any
   record: any
+  audioplayers: any
   syncfusion_flutter_pdf: any
   printing: any
 

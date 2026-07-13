@@ -63,21 +63,22 @@ class NotificationsScreen extends StatelessWidget {
     }
   }
 
-  Color _typeColor(String type) {
+  Color _typeColor(BuildContext context, String type) {
+    final scheme = Theme.of(context).colorScheme;
     switch (type) {
       case 'message':
-        return Colors.blue;
+        return scheme.primary;
       case 'call':
-        return Colors.purple;
+        return scheme.secondary;
       case 'medication':
       case 'medication_schedule':
       case 'medication_cancel':
-        return Colors.green;
+        return scheme.tertiary;
       case 'appointment':
       case 'appointment_schedule':
-        return Colors.orange;
+        return scheme.inversePrimary;
       default:
-        return Colors.teal;
+        return scheme.outline;
     }
   }
 
@@ -141,7 +142,7 @@ class NotificationsScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final currentUserId = FirebaseAuth.instance.currentUser?.uid;
     final theme = Theme.of(context);
-    final isDarkMode = theme.brightness == Brightness.dark;
+    final colorScheme = theme.colorScheme;
 
     if (currentUserId == null) {
       return const Scaffold(
@@ -151,9 +152,9 @@ class NotificationsScreen extends StatelessWidget {
 
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: isDarkMode ? Colors.grey[900] : Colors.white,
-        foregroundColor: Theme.of(context).colorScheme.onSurface,
-        elevation: 2,
+        backgroundColor: theme.scaffoldBackgroundColor,
+        foregroundColor: colorScheme.onSurface,
+        elevation: 0,
         title: const Text('الإشعارات'),
         actions: [
           IconButton(
@@ -195,7 +196,16 @@ class NotificationsScreen extends StatelessWidget {
             return const Center(child: Text('حدث خطأ في تحميل الإشعارات'));
           }
           if (!snapshot.hasData) {
-            return const Center(child: CircularProgressIndicator());
+            return Center(
+              child: Card(
+                elevation: 0,
+                color: colorScheme.surfaceVariant.withOpacity(.35),
+                child: const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: CircularProgressIndicator(),
+                ),
+              ),
+            );
           }
 
           var docs = snapshot.data!.docs;
@@ -209,7 +219,7 @@ class NotificationsScreen extends StatelessWidget {
           });
 
           if (docs.isEmpty) {
-            return const Center(child: Text('لا توجد إشعارات'));
+            return Center(child: Column(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.notifications_off_outlined, size: 72, color: colorScheme.outline), const SizedBox(height: 16), Text('لا توجد إشعارات', style: theme.textTheme.titleMedium), const SizedBox(height: 6), Text('ستظهر التنبيهات المهمة هنا عند وصولها', style: theme.textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant))]));
           }
 
           return ListView.builder(
@@ -219,40 +229,57 @@ class NotificationsScreen extends StatelessWidget {
               final data = doc.data() as Map<String, dynamic>;
               final isRead = data['isRead'] ?? false;
               final type = (data['type'] ?? 'general').toString();
-              final color = _typeColor(type);
+              final color = _typeColor(context, type);
 
               return Card(
-                margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                child: ListTile(
-                  tileColor: isRead ? theme.cardColor : color.withOpacity(0.08),
-                  leading: CircleAvatar(
-                    backgroundColor: color.withOpacity(0.12),
-                    child: Icon(_typeIcon(type), color: color),
-                  ),
-                  title: Text(data['title'] ?? ''),
-                  subtitle: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(data['body'] ?? ''),
-                      const SizedBox(height: 4),
-                      Text(
-                        _formatTimestamp(
-                          (data['createdAt'] ?? data['createdAtClient']) as Timestamp?,
-                        ),
-                        style: const TextStyle(fontSize: 11, color: Colors.grey),
-                      ),
-                    ],
-                  ),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.delete, color: Colors.red),
-                    tooltip: 'حذف الإشعار',
-                    onPressed: () => _deleteNotification(doc.id, context),
-                  ),
+                elevation: 0,
+                color: isRead ? theme.cardColor : color.withOpacity(0.08),
+                margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20),
+                  side: BorderSide(color: isRead ? theme.dividerColor.withOpacity(.18) : color.withOpacity(.22)),
+                ),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(20),
                   onTap: () async {
                     await _markAsRead(doc.id);
                     if (!context.mounted) return;
                     await _openNotificationTarget(context, data);
                   },
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        CircleAvatar(
+                          radius: 24,
+                          backgroundColor: color.withOpacity(0.14),
+                          child: Icon(_typeIcon(type), color: color),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text((data['title'] ?? '').toString(), style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800)),
+                              const SizedBox(height: 6),
+                              Text((data['body'] ?? '').toString(), style: theme.textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant)),
+                              const SizedBox(height: 10),
+                              Text(
+                                _formatTimestamp((data['createdAt'] ?? data['createdAtClient']) as Timestamp?),
+                                style: theme.textTheme.bodySmall?.copyWith(color: colorScheme.outline),
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          icon: Icon(Icons.delete_outline_rounded, color: colorScheme.error),
+                          tooltip: 'حذف الإشعار',
+                          onPressed: () => _deleteNotification(doc.id, context),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               );
             },

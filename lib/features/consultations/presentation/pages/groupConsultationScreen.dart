@@ -9,7 +9,6 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -18,7 +17,8 @@ import '../../../../core/utils/doctor_image_utils.dart';
 import '../widgets/message_reactions_widget.dart';
 
 class GroupConsultationScreen extends StatefulWidget {
-  const GroupConsultationScreen({super.key});
+  final String? groupId;
+  const GroupConsultationScreen({super.key, this.groupId});
 
   @override
   State<GroupConsultationScreen> createState() => _GroupConsultationScreenState();
@@ -37,7 +37,10 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
 
   bool _isSending = false;
   Map<String, dynamic>? _replyToMessage;
-  Set<String> _hiddenMessageIds = <String>{};
+  String? _activeGroupId;
+  Map<String, dynamic>? _activeGroup;
+  String? _accountType;
+  Map<String, dynamic>? _currentUserData;
 
   List<PlatformFile> _selectedFiles = [];
   bool _isRecording = false;
@@ -49,7 +52,10 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
   @override
   void initState() {
     super.initState();
-    _loadHiddenMessages();
+    _activeGroupId = widget.groupId;
+    _loadCurrentUserRole();
+    _loadCurrentUserData();
+    _loadActiveGroup();
     _configureAudioPlayer();
   }
 
@@ -72,9 +78,168 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
     });
   }
 
+
+  DocumentReference<Map<String, dynamic>> get _groupDoc =>
+      _firestore.collection('group_chats').doc(_activeGroupId);
+
+  CollectionReference<Map<String, dynamic>> get _messagesCollection =>
+      _groupDoc.collection('messages');
+
+  Future<void> _loadCurrentUserRole() async {
+    final user = _auth.currentUser;
+    if (user == null) return;
+    final snap = await _firestore.collection('users').doc(user.uid).get();
+    if (mounted) setState(() => _accountType = snap.data()?['accountType']?.toString());
+  }
+
+
+  Future<void> _loadCurrentUserData() async {
+    final user = _auth.currentUser;
+    if (user == null) return;
+    final snap = await _firestore.collection('users').doc(user.uid).get();
+    if (mounted) setState(() => _currentUserData = snap.data() ?? <String, dynamic>{});
+  }
+
+  Future<void> _loadActiveGroup() async {
+    if (_activeGroupId == null) return;
+    final snap = await _groupDoc.get();
+    if (mounted) setState(() => _activeGroup = snap.data());
+  }
+
+  Future<void> _joinGroup(String groupId) async {
+    final user = _auth.currentUser;
+    if (user == null) return;
+    final userData = (await _firestore.collection('users').doc(user.uid).get()).data() ?? {};
+    final ref = _firestore.collection('group_chats').doc(groupId);
+    await _firestore.runTransaction((tx) async {
+      final snap = await tx.get(ref);
+      final data = snap.data() ?? {};
+      final members = List<String>.from(data['memberIds'] as List? ?? const []);
+      if (!members.contains(user.uid)) {
+        tx.set(ref.collection('members').doc(user.uid), {
+          'uid': user.uid,
+          'name': userData['fullName'] ?? user.displayName ?? 'مستخدم',
+          'image': userData['photoURL'] ?? user.photoURL,
+          'gender': userData['gender'],
+          'joinedAt': FieldValue.serverTimestamp(),
+        });
+        tx.update(ref, {
+          'memberIds': FieldValue.arrayUnion([user.uid]),
+          'memberCount': FieldValue.increment(1),
+          'deletedFor': FieldValue.arrayRemove([user.uid]),
+        });
+      }
+    });
+    setState(() => _activeGroupId = groupId);
+    await _loadActiveGroup();
+  }
+
+  Future<void> _leaveGroup() async {
+    final user = _auth.currentUser;
+    if (user == null || _activeGroupId == null) return;
+    await _firestore.runTransaction((tx) async {
+      final snap = await tx.get(_groupDoc);
+      final members = List<String>.from(snap.data()?['memberIds'] as List? ?? const []);
+      if (members.contains(user.uid)) {
+        tx.delete(_groupDoc.collection('members').doc(user.uid));
+        tx.update(_groupDoc, {
+          'memberIds': FieldValue.arrayRemove([user.uid]),
+          'memberCount': FieldValue.increment(-1),
+        });
+      }
+    });
+    if (mounted) setState(() { _activeGroupId = null; _activeGroup = null; });
+  }
+
+  Future<void> _createGroup() async {
+    final controller = TextEditingController();
+    final name = await showDialog<String>(context: context, builder: (context) => AlertDialog(
+      title: const Text('إنشاء مجموعة جديدة'),
+      content: TextField(controller: controller, decoration: const InputDecoration(labelText: 'اسم المجموعة')),
+      actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('إلغاء')), FilledButton(onPressed: () => Navigator.pop(context, controller.text.trim()), child: const Text('إنشاء'))],
+    ));
+    if (name == null || name.isEmpty) return;
+    final image = await _imagePicker.pickImage(source: ImageSource.gallery, imageQuality: 70, maxWidth: 600);
+    String? imageBase64;
+    if (image != null) {
+      final bytes = await File(image.path).readAsBytes();
+      if (_canStoreInline(bytes.length)) imageBase64 = base64Encode(bytes);
+    }
+    final user = _auth.currentUser;
+    if (user == null) return;
+    final userData = (await _firestore.collection('users').doc(user.uid).get()).data() ?? {};
+    final ref = await _firestore.collection('group_chats').add({
+      'name': name,
+      'imageUrl': null,
+      'imageBase64': imageBase64,
+      'createdBy': user.uid,
+      'createdByName': userData['fullName'] ?? user.displayName ?? 'طبيب',
+      'createdAt': FieldValue.serverTimestamp(),
+      'memberIds': [user.uid],
+      'memberCount': 1,
+      'deletedFor': <String>[],
+      'lastMessage': '',
+      'lastMessageTime': FieldValue.serverTimestamp(),
+    });
+    await ref.collection('members').doc(user.uid).set({'uid': user.uid, 'name': userData['fullName'] ?? user.displayName ?? 'طبيب', 'image': userData['photoURL'], 'gender': userData['gender'], 'joinedAt': FieldValue.serverTimestamp()});
+    setState(() => _activeGroupId = ref.id);
+    await _loadActiveGroup();
+  }
+
+  Widget _buildGroupsHome(ThemeData theme) {
+    final userId = _auth.currentUser?.uid;
+    return Scaffold(
+      appBar: AppBar(title: const Text('المجموعات'), actions: [if (_accountType == 'doctor') IconButton(onPressed: _createGroup, icon: const Icon(Icons.add_circle_outline_rounded))]),
+      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: _firestore.collection('group_chats').orderBy('lastMessageTime', descending: true).snapshots(),
+        builder: (context, snapshot) {
+          if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+          final docs = snapshot.data!.docs.where((d) => !List<String>.from(d.data()['deletedFor'] as List? ?? const []).contains(userId)).toList();
+          if (docs.isEmpty) return Center(child: Text(_accountType == 'doctor' ? 'أنشئ أول مجموعة للمرضى' : 'لا توجد مجموعات متاحة حالياً'));
+          return ListView.separated(
+            padding: const EdgeInsets.all(12), itemCount: docs.length, separatorBuilder: (_, __) => const SizedBox(height: 8),
+            itemBuilder: (context, index) { final doc = docs[index]; final data = doc.data(); final joined = List<String>.from(data['memberIds'] as List? ?? const []).contains(userId);
+              return Card(child: ListTile(
+                leading: CircleAvatar(
+                  backgroundColor: theme.colorScheme.primaryContainer,
+                  backgroundImage: _groupAvatarProvider(data),
+                  child: _groupAvatarProvider(data) == null ? Icon(Icons.groups_rounded, color: theme.colorScheme.primary) : null,
+                ),
+                title: Text((data['name'] ?? 'مجموعة').toString()),
+                subtitle: Text('${data['memberCount'] ?? 0} عضو • ${data['lastMessage'] ?? ''}'),
+                trailing: FilledButton.tonal(onPressed: () => joined ? setState(() { _activeGroupId = doc.id; _activeGroup = data; }) : _joinGroup(doc.id), child: Text(joined ? 'فتح' : 'انضمام')),
+              )); },
+          );
+        },
+      ),
+      floatingActionButton: _accountType == 'doctor' ? FloatingActionButton.extended(onPressed: _createGroup, icon: const Icon(Icons.add), label: const Text('مجموعة جديدة')) : null,
+    );
+  }
+
+
+  ImageProvider? _groupAvatarProvider(Map<String, dynamic> data) {
+    final imageUrl = (data['imageUrl'] ?? '').toString();
+    if (imageUrl.isNotEmpty) return NetworkImage(imageUrl);
+    final imageBase64 = (data['imageBase64'] ?? '').toString();
+    if (imageBase64.isNotEmpty) return MemoryImage(base64Decode(imageBase64));
+    return null;
+  }
+
+  Future<void> _showGroupActions() async {
+    final members = _activeGroup?['memberCount'] ?? 0;
+    final action = await showModalBottomSheet<String>(context: context, showDragHandle: true, builder: (context) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
+      ListTile(leading: const Icon(Icons.groups_rounded), title: Text('$members عضو')),
+      ListTile(leading: const Icon(Icons.logout_rounded), title: const Text('مغادرة المجموعة'), onTap: () => Navigator.pop(context, 'leave')),
+      ListTile(leading: const Icon(Icons.delete_outline_rounded), title: const Text('حذف المحادثة من قائمتي'), onTap: () => Navigator.pop(context, 'delete')),
+    ])));
+    if (action == 'leave') await _leaveGroup();
+    if (action == 'delete') await _confirmHideAllMessages();
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    if (_activeGroupId == null) return _buildGroupsHome(theme);
     return Scaffold(
       appBar: AppBar(
         backgroundColor: theme.colorScheme.primary,
@@ -84,12 +249,13 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
             CircleAvatar(
               radius: 18,
               backgroundColor: Colors.white.withOpacity(.18),
-              child: const Icon(Icons.groups_rounded, color: Colors.white),
+              backgroundImage: _activeGroup == null ? null : _groupAvatarProvider(_activeGroup!),
+              child: _activeGroup == null || _groupAvatarProvider(_activeGroup!) == null ? const Icon(Icons.groups_rounded, color: Colors.white) : null,
             ),
             const SizedBox(width: 12),
-            const Expanded(
+            Expanded(
               child: Text(
-                "الاستشارة الجماعية",
+                (_activeGroup?['name'] ?? "الاستشارة الجماعية").toString(),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -99,9 +265,9 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
         elevation: 2,
         actions: [
           IconButton(
-            tooltip: 'حذف جميع المحادثات من جهازي',
-            onPressed: _confirmHideAllMessages,
-            icon: const Icon(Icons.delete_sweep_rounded),
+            tooltip: 'معلومات المجموعة',
+            onPressed: _showGroupActions,
+            icon: const Icon(Icons.info_outline_rounded),
           ),
         ],
       ),
@@ -132,12 +298,16 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
 
   Widget _buildMessagesList() {
     return StreamBuilder<QuerySnapshot>(
-      stream: _firestore.collection("group_consultations").orderBy("timestamp", descending: false).snapshots(),
+      stream: _messagesCollection.orderBy("timestamp", descending: false).snapshots(),
       builder: (context, snapshot) {
         if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
         final theme = Theme.of(context);
         final isDarkMode = theme.brightness == Brightness.dark;
-        final messages = snapshot.data!.docs.where((doc) => !_hiddenMessageIds.contains(doc.id)).toList();
+        final messages = snapshot.data!.docs.where((doc) {
+          final data = doc.data() as Map<String, dynamic>;
+          final deletedFor = List<String>.from(data['deletedFor'] as List? ?? const []);
+          return !deletedFor.contains(_auth.currentUser?.uid);
+        }).toList();
 
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (_scrollController.hasClients) {
@@ -381,9 +551,9 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
 
               const SizedBox(height: 6),
               MessageReactionsWidget(
-                consultationId: 'group_consultations',
+                consultationId: _activeGroupId!,
                 messageId: messageId,
-                rootCollection: 'group_consultations',
+                rootCollection: 'group_chats',
                 showAddButton: true,
               ),
               Row(
@@ -486,23 +656,36 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
     setState(() => _isSending = true);
 
     try {
-      final userData = await _firestore.collection("users").doc(user.uid).get();
-      final fullName = userData.data()?['fullName'] ?? 'مستخدم';
-      final photoURL = userData.data()?['photoURL'];
+      final cachedUserData = _currentUserData;
+      final userData = cachedUserData ?? (await _firestore.collection("users").doc(user.uid).get()).data() ?? <String, dynamic>{};
+      _currentUserData ??= userData;
+      final fullName = userData['fullName'] ?? user.displayName ?? 'مستخدم';
+      final photoURL = userData['photoURL'] ?? user.photoURL;
+      final senderGender = userData['gender'];
+      final text = _messageController.text.trim();
+      final replyTo = _replyToMessage;
+      final selectedFiles = List<PlatformFile>.from(_selectedFiles);
+
+      _messageController.clear();
+      setState(() {
+        _replyToMessage = null;
+        _selectedFiles.clear();
+      });
 
       final List<Map<String, String>> files = [];
 
-      for (final file in _selectedFiles) {
+      for (final file in selectedFiles) {
         final uploadedFile = await _encodeGroupFileInline(file);
         files.add(uploadedFile);
       }
 
       final firstFile = files.isNotEmpty ? files.first : null;
       final msg = {
-        'text': _messageController.text.trim(),
+        'text': text,
         'senderId': user.uid,
         'senderName': fullName,
         'senderImage': photoURL,
+        'senderGender': senderGender,
         'timestamp': FieldValue.serverTimestamp(),
         'files': files,
         'fileUrl': firstFile?['fileUrl'],
@@ -511,16 +694,18 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
         'type': firstFile?['fileType'] ?? 'text',
         'status': 'sent',
         'reactions': <String, dynamic>{},
-        'replyTo': _replyToMessage,
+        'replyTo': replyTo,
       };
 
-      await _firestore.collection("group_consultations").add(msg);
-
-      _messageController.clear();
-      setState(() {
-        _replyToMessage = null;
-        _selectedFiles.clear();
+      final messageRef = _messagesCollection.doc();
+      final batch = _firestore.batch();
+      batch.set(messageRef, msg);
+      batch.update(_groupDoc, {
+        'lastMessage': text.isNotEmpty ? text : 'مرفق',
+        'lastMessageTime': FieldValue.serverTimestamp(),
+        'deletedFor': FieldValue.arrayRemove([user.uid]),
       });
+      await batch.commit();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -751,19 +936,6 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
     return path;
   }
 
-  Future<void> _loadHiddenMessages() async {
-    final prefs = await SharedPreferences.getInstance();
-    if (!mounted) return;
-    setState(() => _hiddenMessageIds = (prefs.getStringList(_hiddenMessagesKey) ?? <String>[]).toSet());
-  }
-
-  String get _hiddenMessagesKey => 'group_consultations_hidden_${_auth.currentUser?.uid ?? 'guest'}';
-
-  Future<void> _saveHiddenMessages() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(_hiddenMessagesKey, _hiddenMessageIds.toList());
-  }
-
 
   Future<void> _showMessageOptions(String messageId, Map<String, dynamic> message, bool isMe) async {
     final selected = await showModalBottomSheet<String>(
@@ -817,7 +989,7 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
     );
     if (confirmed != true) return;
     try {
-      await _firestore.collection('group_consultations').doc(messageId).delete();
+      await _messagesCollection.doc(messageId).delete();
     } catch (_) {
       _showSnackBar('فشل في حذف الرسالة');
     }
@@ -836,12 +1008,14 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
       ),
     );
     if (confirmed != true) return;
-    setState(() => _hiddenMessageIds.add(messageId));
-    await _saveHiddenMessages();
+    final userId = _auth.currentUser?.uid;
+    if (userId == null) return;
+    await _messagesCollection.doc(messageId).update({'deletedFor': FieldValue.arrayUnion([userId])});
   }
 
   Future<void> _confirmHideAllMessages() async {
-    final snapshot = await _firestore.collection("group_consultations").get();
+    final userId = _auth.currentUser?.uid;
+    if (userId == null || _activeGroupId == null) return;
     if (!mounted) return;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -855,39 +1029,13 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
       ),
     );
     if (confirmed != true) return;
-    setState(() => _hiddenMessageIds.addAll(snapshot.docs.map((doc) => doc.id)));
-    await _saveHiddenMessages();
+    await _groupDoc.update({'deletedFor': FieldValue.arrayUnion([userId])});
+    if (mounted) Navigator.pop(context);
   }
 
   String _safeFileName(String fileName) {
     final safeName = fileName.trim().replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
     return safeName.isEmpty ? 'group_attachment' : safeName;
-  }
-
-  String _resolveContentType(String extension, bool isImage) {
-    if (isImage) return 'image/$extension';
-    switch (extension) {
-      case 'pdf':
-        return 'application/pdf';
-      case 'doc':
-        return 'application/msword';
-      case 'docx':
-        return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-      case 'xls':
-        return 'application/vnd.ms-excel';
-      case 'xlsx':
-        return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-      case 'ppt':
-        return 'application/vnd.ms-powerpoint';
-      case 'pptx':
-        return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
-      case 'zip':
-        return 'application/zip';
-      case 'rar':
-        return 'application/vnd.rar';
-      default:
-        return 'application/octet-stream';
-    }
   }
 
   Future<void> _openGroupFile({
@@ -951,8 +1099,6 @@ class ImagePreviewScreen extends StatelessWidget {
   final String imageUrl;
   final String imageBase64;
   const ImagePreviewScreen({super.key, required this.imageUrl, this.imageBase64 = ''});
-
-
 
 
   @override

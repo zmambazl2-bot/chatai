@@ -16,6 +16,7 @@ class UpcomingAppointmentsWidget extends StatefulWidget {
 
 class _UpcomingAppointmentsWidgetState extends State<UpcomingAppointmentsWidget> {
   final currentUserId = FirebaseAuth.instance.currentUser!.uid;
+  final Map<String, Future<DocumentSnapshot>> _userDocCache = {};
 
   // تعريب التاريخ
   String formatArabicDate(DateTime date) {
@@ -89,22 +90,48 @@ class _UpcomingAppointmentsWidgetState extends State<UpcomingAppointmentsWidget>
                 final appointment = filteredAppointments[index];
                 final date = appointment.date.toDate();
 
-                final displayName = accountType == 'doctor'
-                    ? appointment.userName
-                    : appointment.doctorName;
+                if (accountType == 'doctor') {
+                  return _buildAppointmentCard(
+                    context,
+                    appointment.userName,
+                    appointment.userImageUrl ?? '',
+                    appointment,
+                    date,
+                    specialty: appointment.specialtyName,
+                  );
+                }
 
-                final displayImage = accountType == 'doctor'
-                    ? appointment.userImageUrl ?? ''
-                    : appointment.doctorImageUrl ?? '';
+                return FutureBuilder<DocumentSnapshot>(
+                  future: _doctorDocFuture(appointment.doctorId),
+                  builder: (context, doctorSnapshot) {
+                    final doctorData = doctorSnapshot.data?.data() as Map<String, dynamic>?;
+                    final displayImage = (doctorData?['photoURL'] ?? appointment.doctorImageUrl ?? '').toString();
+                    final displayGender = (doctorData?['gender'] ?? appointment.doctorGender)?.toString();
+                    final displayName = (doctorData?['fullName'] ?? appointment.doctorName).toString();
 
-                final specialty = appointment.specialtyName;
-
-                return _buildAppointmentCard(context, displayName, displayImage, appointment, date, specialty: specialty);
+                    return _buildAppointmentCard(
+                      context,
+                      displayName,
+                      displayImage,
+                      appointment,
+                      date,
+                      specialty: appointment.specialtyName,
+                      displayGender: displayGender,
+                    );
+                  },
+                );
               },
             ),
           ],
         );
       },
+    );
+  }
+
+  Future<DocumentSnapshot> _doctorDocFuture(String doctorId) {
+    return _userDocCache.putIfAbsent(
+      doctorId,
+      () => FirebaseFirestore.instance.collection('users').doc(doctorId).get(),
     );
   }
 
@@ -115,6 +142,7 @@ class _UpcomingAppointmentsWidgetState extends State<UpcomingAppointmentsWidget>
       Appointment appointment,
       DateTime date, {
         String specialty = '',
+        String? displayGender,
       }) {
     final status = appointment.status;
     final theme = Theme.of(context);
@@ -171,7 +199,7 @@ class _UpcomingAppointmentsWidgetState extends State<UpcomingAppointmentsWidget>
             children: [
               CircleAvatar(
                 radius: 30,
-                backgroundImage: DoctorImageUtils.imageProvider(imageUrl: displayImage, gender: appointment.doctorGender),
+                backgroundImage: DoctorImageUtils.imageProvider(imageUrl: displayImage, gender: displayGender),
               ),
               const SizedBox(width: 12),
               Expanded(
