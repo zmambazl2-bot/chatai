@@ -291,7 +291,11 @@ class _InstantConsultationScreenState extends State<InstantConsultationScreen> {
           return const Center(child: Text('لا توجد بيانات'));
         }
 
-        var docs = snap.data!.docs;
+        var docs = snap.data!.docs.where((doc) {
+          final data = doc.data() as Map<String, dynamic>;
+          final deletedFor = List<String>.from(data['deletedFor'] as List? ?? const []);
+          return !deletedFor.contains(doctor.uid);
+        }).toList();
         // فرز محلياً حسب lastMessageTime (الأحدث أولاً)
         docs.sort((a, b) {
           final aTime = (a.data() as Map<String, dynamic>)['lastMessageTime'] as Timestamp?;
@@ -409,7 +413,11 @@ class _InstantConsultationScreenState extends State<InstantConsultationScreen> {
           .snapshots(),
       builder: (ctx, snap) {
         if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-        var docs = snap.data!.docs;
+        var docs = snap.data!.docs.where((doc) {
+          final data = doc.data() as Map<String, dynamic>;
+          final deletedFor = List<String>.from(data['deletedFor'] as List? ?? const []);
+          return !deletedFor.contains(user.uid);
+        }).toList();
 
         // فرز محلياً حسب lastMessageTime (الأحدث أولاً)
         docs.sort((a, b) {
@@ -595,7 +603,7 @@ class _InstantConsultationScreenState extends State<InstantConsultationScreen> {
           children: [
             ListTile(
               leading: const Icon(Icons.delete_outline, color: Colors.red),
-              title: const Text('حذف المحادثة بالكامل'),
+              title: const Text('حذف المحادثة من قائمتي'),
               subtitle: Text(displayName),
               onTap: () {
                 Navigator.pop(context);
@@ -613,7 +621,7 @@ class _InstantConsultationScreenState extends State<InstantConsultationScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('حذف المحادثة'),
-        content: Text('هل تريد حذف محادثة $displayName وجميع رسائلها من قاعدة البيانات؟'),
+        content: Text('هل تريد حذف محادثة $displayName من قائمتك فقط؟ لن تتأثر لدى الطرف الآخر.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -630,10 +638,10 @@ class _InstantConsultationScreenState extends State<InstantConsultationScreen> {
     if (confirm != true) return;
 
     try {
-      await _deleteConsultationCompletely(consultationId);
+      await _hideConsultationForCurrentUser(consultationId);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('تم حذف المحادثة بالكامل')),
+        const SnackBar(content: Text('تم حذف المحادثة من قائمتك')),
       );
     } catch (e) {
       if (!mounted) return;
@@ -644,6 +652,16 @@ class _InstantConsultationScreenState extends State<InstantConsultationScreen> {
         ),
       );
     }
+  }
+
+
+  Future<void> _hideConsultationForCurrentUser(String consultationId) async {
+    final userId = _auth.currentUser?.uid;
+    if (userId == null) return;
+    await _firestore.collection('consultations').doc(consultationId).set({
+      'deletedFor': FieldValue.arrayUnion([userId]),
+      'deletedAtByUser.$userId': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
   }
 
   Future<void> _deleteConsultationCompletely(String consultationId) async {
@@ -722,6 +740,7 @@ class _InstantConsultationScreenState extends State<InstantConsultationScreen> {
       'newMessageFor': null,
       'unreadCount.$currentUserId': 0,
       'seenBy': FieldValue.arrayUnion([currentUserId]),
+      'deletedFor': FieldValue.arrayRemove([currentUserId]),
     });
 
     Navigator.push(context, MaterialPageRoute(builder: (_) =>
